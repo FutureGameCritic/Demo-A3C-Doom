@@ -1,0 +1,7 @@
+# pytorch
+torch
+torchvision
+# tensorflow : hparams
+tensorflow
+# doom
+vizdoom
