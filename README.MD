@@ -4,7 +4,7 @@ Demo-A3C-Doom
 ```
 conda create -y -n dad python=3.6
 source activate dad
-pip3 install -r requirements.txt
+sudo pip3 install -r requirements.txt
 ```
 `@Warnning`
 conda is recommanded to install vizdoom. but, you can use naive-pip3 by installing all os-dependency that following guide in `os/~` folder.

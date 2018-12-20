@@ -116,3 +116,7 @@ dmypy.json
 
 # my virtualenv
 dad/
+# vscode
+.vscode/
+# ini
+_vizdoom.ini
