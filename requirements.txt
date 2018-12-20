@@ -1,6 +1,8 @@
 # pytorch
-torch
-torchvision
+# torch
+# torchvision
+# gluon
+mxnet
 # tensorflow : hparams
 tensorflow
 # doom
