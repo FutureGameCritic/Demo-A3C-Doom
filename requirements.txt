@@ -1,9 +1,18 @@
-# pytorch
+## utils
+numpy
+termcolor
+
+## pytorch
 # torch
 # torchvision
-# gluon
+
+## gluon
 mxnet
-# tensorflow : hparams
+
+## tensorflow : hparams
 tensorflow
-# doom
+# if you use python3.7, following below line.
+# pip3 install --upgrade https://storage.googleapis.com/tensorflow/mac/cpu/tensorflow-1.12.0-py3-none-any.whl
+
+## doom
 vizdoom

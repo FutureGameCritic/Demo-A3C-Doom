@@ -116,6 +116,7 @@ dmypy.json
 
 # my virtualenv
 dad/
+doom/
 # vscode
 .vscode/
 # ini
