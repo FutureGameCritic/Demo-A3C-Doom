@@ -6,19 +6,19 @@ def doom():
     game.set_doom_map("map01")
 
     # Sets resolution. Default is 320X240
-    game.set_screen_resolution(vzd.ScreenResolution.RES_640X480)
+    game.set_screen_resolution(vzd.ScreenResolution.RES_320X240)
 
     # Sets the screen buffer format. Not used here but now you can change it. Defalut is CRCGCB.
-    game.set_screen_format(vzd.ScreenFormat.RGB24)
+    game.set_screen_format(vzd.ScreenFormat.GRAY8)
 
     # Enables depth buffer.
-    game.set_depth_buffer_enabled(True)
+    game.set_depth_buffer_enabled(False)
 
     # Enables labeling of in game objects labeling.
     game.set_labels_buffer_enabled(True)
 
     # Enables buffer with top down map of the current episode/level.
-    game.set_automap_buffer_enabled(True)
+    game.set_automap_buffer_enabled(False)
 
     # Sets other rendering options (all of these options except crosshair are enabled (set to True) by default)
     game.set_render_hud(False)
@@ -50,7 +50,7 @@ def doom():
     game.set_window_visible(True)
 
     # Turns on the sound. (turned off by default)
-    game.set_sound_enabled(True)
+    game.set_sound_enabled(False)
 
     # Sets the livin reward (for each move) to -1
     game.set_living_reward(-1)
