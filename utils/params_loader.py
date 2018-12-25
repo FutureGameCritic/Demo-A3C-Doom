@@ -6,10 +6,13 @@ class loader():
         self.parser = argparse.ArgumentParser(description='parameters')
         self.hparams = dict()
 
-    def add_argument(self, name, type, default, help):
-        self.parser.add_argument('--'+name, type=type, help=help)
+    def add_argument(self, name, type, default, help=""):
+        self.parser.add_argument('--'+name, type=type, default=default, help=help)
         self.hparams[name] = default
     
+    def add_parameter(self, name, value):
+        self.hparams[name] = value
+
     def parsing(self):
         args = self.parser.parse_args()
         cmd = ",".join(['{}={}'.format(arg, getattr(args, arg)) for arg in vars(args)])
@@ -18,4 +21,3 @@ class loader():
         hparams.parse(cmd)
 
         return hparams
-        
