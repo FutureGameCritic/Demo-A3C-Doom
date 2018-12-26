@@ -2,7 +2,7 @@ Demo-A3C-Doom
 
 ### captures
 - A2C using Gluon Model  
-![](https://github.com/FutureGameCritic/Demo-A3C-Doom/blob/master/capture/a2c_on_gluon.png =250x250)  
+![](https://github.com/FutureGameCritic/Demo-A3C-Doom/blob/master/capture/a2c_on_gluon.png)  
 
 ## install
 ```
