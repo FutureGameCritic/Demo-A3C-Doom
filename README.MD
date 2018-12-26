@@ -1,5 +1,8 @@
 Demo-A3C-Doom
 
+### A2C using Gluon Model
+![](https://github.com/FutureGameCritic/Demo-A3C-Doom/blob/master/capture/a2c_on_gluon.png)
+
 ## install
 ```
 conda create -y -n dad python=3.6
