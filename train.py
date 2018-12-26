@@ -18,41 +18,42 @@ print(colored("hyper parameters", "green"))
 print(colored(hparams.values(), "green"))
 print("-------------------------------")
 
-# from game import doom
-# game, actions = doom()
+from game import doom
+game, actions = doom()
 
-# from model import A2C
-# agent = A2C(hparams)
+from model_gluon import A2C
+agent = A2C(hparams)
 
-# for e in range(hparams.n_episode):
-#     done = False
-#     game.new_episode()
+print("-------------------------------")
+for e in range(hparams.n_episode):
+    done = False
+    game.new_episode()
 
-#     print(colored("Episode #" + str(e + 1), "green"))
+    print(colored("Episode #" + str(e + 1), "green"))
     
-#     while not done:
-#         state = game.get_state()
+    while not done:
+        state = game.get_state()
         
-#         n = state.number
-#         cur_state = agent.get_state_from_game(state)
+        n = state.number
+        cur_state = agent.get_state_from_game(state)
 
-#         action = agent.get_action(cur_state)
+        action = agent.get_action(cur_state)
         
-#         r = game.make_action(actions[action])
-#         next_state = agent.get_state_from_game(game.get_state())
-#         done = game.is_episode_finished()
+        reward = game.make_action(actions[action])
+        next_state = agent.get_state_from_game(game.get_state())
+        done = game.is_episode_finished()
 
-#         agent.train_step(cur_state, action, reward, next_state, done)
+        agent.train_step(cur_state, action, reward, next_state, done)
 
-#         print("State #" + str(n))
-#         print("Reward:", r)
+        print("State #" + str(n))
+        print("Reward:", reward)
 
-#         # sleep_time = 1.0
-#         # if sleep_time > 0:
-#         #     sleep(sleep_time)
+        # sleep_time = 1.0
+        # if sleep_time > 0:
+        #     sleep(sleep_time)
     
-#     print(colored("Episode finished.", "green")
-#     print(colored("Total reward:{}".format(game.get_total_reward()), "yellow"))
-#     print(" ")
+    print(colored("Episode finished.", "green"))
+    print(colored("Total reward:{}".format(game.get_total_reward()), "yellow"))
+    print(" ")
 
-# game.close()
+game.close()
