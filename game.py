@@ -21,33 +21,31 @@ def doom(hparams):
     game.set_automap_buffer_enabled(False)
 
     # Sets other rendering options (all of these options except crosshair are enabled (set to True) by default)
-    game.set_render_hud(False)
-    game.set_render_minimal_hud(False)  # If hud is enabled
-    game.set_render_crosshair(False)
-    game.set_render_weapon(True)
-    game.set_render_decals(False)  # Bullet holes and blood on the walls
-    game.set_render_particles(False)
-    game.set_render_effects_sprites(False)  # Smoke and blood
-    game.set_render_messages(False)  # In-game messages
-    game.set_render_corpses(False)
-    game.set_render_screen_flashes(True)  # Effect upon taking damage or picking up items
+    if hparams.fast_train is False:
+        game.set_render_hud(False)
+        game.set_render_minimal_hud(False)  # If hud is enabled
+        game.set_render_crosshair(False)
+        game.set_render_weapon(True)
+        game.set_render_decals(False)  # Bullet holes and blood on the walls
+        game.set_render_particles(False)
+        game.set_render_effects_sprites(False)  # Smoke and blood
+        game.set_render_messages(False)  # In-game messages
+        game.set_render_corpses(False)
+        game.set_render_screen_flashes(True)  # Effect upon taking damage or picking up items
+    else:
+        game.set_window_visible(False)
+
 
     # Adds buttons that will be allowed.
     game.add_available_button(vzd.Button.MOVE_LEFT)
     game.add_available_button(vzd.Button.MOVE_RIGHT)
     game.add_available_button(vzd.Button.ATTACK)
 
-    # Adds game variables that will be included in state.
-    game.add_available_game_variable(vzd.GameVariable.AMMO2)
-
     # Causes episodes to finish after 200 tics (actions)
     game.set_episode_timeout(hparams.n_step)
 
     # Makes episodes start after 10 tics (~after raising the weapon)
     game.set_episode_start_time(10)
-
-    # Makes the window appear (turned on by default)
-    game.set_window_visible(True)
 
     # Turns on the sound. (turned off by default)
     game.set_sound_enabled(False)
@@ -57,9 +55,6 @@ def doom(hparams):
 
     # Sets ViZDoom mode (PLAYER, ASYNC_PLAYER, SPECTATOR, ASYNC_SPECTATOR, PLAYER mode is default)
     game.set_mode(vzd.Mode.PLAYER)
-
-    # Enables engine output to console.
-    #game.set_console_enabled(True)
 
     # Initialize the game. Further configuration won't take any effect from now on.
     game.init()
