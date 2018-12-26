@@ -1,6 +1,7 @@
 ## utils
 numpy
 termcolor
+scikit-image
 
 ## pytorch
 # torch
@@ -8,6 +9,7 @@ termcolor
 
 ## gluon
 mxnet
+mxboard
 
 ## tensorflow : hparams
 tensorflow

@@ -8,6 +8,7 @@ hparams.add_argument('n_step', type=int, default=100, help='total step num')
 hparams.add_argument('discount_factor', type=float, default=0.99, help='discount factor')
 hparams.add_argument('actor_learning_rate', type=float, default=0.001, help='actor learning rate')
 hparams.add_argument('critic_learning_rate', type=float, default=0.005, help='critic learning rate')
+hparams.add_argument('logdir', type=str, default='./logs', help='log directory path')
 
 hparams.add_parameter('action_size', 3)
 hparams.add_parameter('value_size', 1)
@@ -35,22 +36,25 @@ for e in range(hparams.n_episode):
     e_progressbar.add_epoch()
 
     while not done:
-        state = game.get_state()
+        state = agent.get_state_from_game(game.get_state())
         
-        cur_state = agent.get_state_from_game(state)
-
-        action = agent.get_action(cur_state)
+        action = agent.get_action(state)
         
         reward = game.make_action(actions[action])
-        done = game.is_episode_finished()
-        if not done:
-            next_state = agent.get_state_from_game(game.get_state())
-            agent.train_step(cur_state, action, reward, next_state, done)
-    
-        e_progressbar.printf(colored("reward:{}".format(reward), "green"))
 
-    print(colored("Episode finished.", "green"))
-    print(colored("Total reward:{}".format(game.get_total_reward()), "yellow"))
+        done = game.is_episode_finished()
+        
+        next_state = agent.get_state_from_game(game.get_state()) if not done else state
+
+        agent.train_step(state, action, reward, next_state, done)
+    
+        e_progressbar.printf("")
+        
+    # @hack : e_progressbar.step
+    score = game.get_total_reward()
+    agent.summary(e, score, e_progressbar.step)
     print(" ")
+    print(colored("Total reward:{}".format(score), "yellow"))
 
 game.close()
+agent.close()

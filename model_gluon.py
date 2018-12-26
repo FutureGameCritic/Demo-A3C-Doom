@@ -1,5 +1,6 @@
 import numpy as np
 from termcolor import colored
+from skimage.transform import resize
 
 import mxnet as mx
 import mxnet.ndarray as F
@@ -7,6 +8,7 @@ from mxnet import nd, gluon, autograd
 from mxnet.gluon import nn
 from mxnet.gluon.block import Block, HybridBlock
 from mxnet.gluon.loss import Loss, L1Loss
+from mxboard import * 
 
 class Softmax(HybridBlock):
     def __init__(self, **kwargs):
@@ -48,6 +50,15 @@ class A2C(object):
 
         self.net_actor, self.net_critic = self.build_model()
         self.trainer_actor, self.loss_actor, self.trainer_critic, self.loss_critic = self.get_optimizer()
+        
+        self.history = []
+
+        self.sw = SummaryWriter(logdir=self.hparams.logdir)
+        self.all_p_max = 0.
+
+    def close(self):
+        # @hack
+        self.sw.close()
 
     def get_ctx(self):
         if mx.context.num_gpus() > 0:
@@ -83,9 +94,17 @@ class A2C(object):
         return trainer_actor, loss_actor, trainer_critic, loss_critic
 
     def get_state_from_game(self, state):
-        s = nd.array(state.screen_buffer)
-        # @hack
-        our_state = nd.reshape(s, shape=(1, 1, 320, 240))
+        s = resize(state.screen_buffer, (84, 84), mode='constant')
+        s = np.float32(s / 255.)
+        if not self.history:
+            self.history = [s, s, s, s]
+        else:
+            for i in range(3):
+                self.history[i] = self.history[i+1]
+            self.history[3] = s
+        
+        our_state = nd.array(self.history)
+        our_state = nd.expand_dims(our_state, axis=0) # [1, 4, 84, 84]
         return our_state
         
     def get_action(self, state):
@@ -96,7 +115,8 @@ class A2C(object):
         with autograd.record():
             value = self.net_critic(state)
             next_value = self.net_critic(next_state)
-            
+            prob = self.net_actor(state)
+
             # one-hot encoding
             act = nd.array(np.zeros([1, self.hparams.action_size]))
             act[0][action] = 1
@@ -109,10 +129,31 @@ class A2C(object):
                 target = reward + self.hparams.discount_factor * next_value
             
             # update actor
-            self.loss_actor(act, self.net_actor(state), advantage).backward(retain_graph=True)
-
+            self.loss_actor(act, prob, advantage).backward(retain_graph=True)
             # update critic
             self.loss_critic(value, target).backward(retain_graph=True)
 
         self.trainer_actor.step(1)
         self.trainer_critic.step(1)
+
+        # to summary
+        self.all_p_max += np.amax(prob.asnumpy()[0])       
+
+    def summary(self, n_episode, score, duration):
+        self.sw.add_scalar(
+            tag='socre', 
+            value=score,
+            global_step=n_episode
+        )
+        self.sw.add_scalar(
+            tag='duration', 
+            value=duration,
+            global_step=n_episode
+        )
+        self.sw.add_scalar(
+            tag='avg_p_max',
+            value=self.all_p_max / duration,
+            global_step=n_episode
+        )
+
+        self.all_p_max = 0.
