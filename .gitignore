@@ -121,5 +121,7 @@ doom/
 .vscode/
 # ini
 _vizdoom.ini
-# logs
+# etc
 logs/
+models/
+.DS_Store

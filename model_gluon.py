@@ -2,6 +2,8 @@ import numpy as np
 from termcolor import colored
 from skimage.transform import resize
 
+from utils import get_latest_epoch
+
 import mxnet as mx
 import mxnet.ndarray as F
 from mxnet import nd, gluon, autograd
@@ -53,12 +55,27 @@ class A2C(object):
         
         self.history = []
 
-        self.sw = SummaryWriter(logdir=self.hparams.logdir)
+        self.sw = SummaryWriter(logdir=self.hparams.log_dir) if self.hparams.log_dir else None
         self.all_p_max = 0.
 
+    def save_model(self, epoch):
+        self.net_actor.save_parameters("{}/net_actor_{}".format(self.hparams.save_dir, epoch))
+        self.net_critic.save_parameters("{}/net_critic_{}".format(self.hparams.save_dir, epoch))
+        print(colored("===> Save Model in epoch {}".format(e), "green"))
+
+    def load_model(self):
+        if self.hparams.load_epoch:
+            epoch = self.hparams.load_epoch
+        else:
+            epoch = get_latest_epoch(self.hparams.load_dir)
+            
+        self.net_actor.load_parameters("{}/net_actor_{}".format(self.hparams.load_dir, epoch), ctx=self.ctx)
+        self.net_critic.load_parameters("{}/net_critic_{}".format(self.hparams.load_dir, epoch), ctx=self.ctx)
+        print(colored("===> Load Model in epoch {}".format(epoch), "green"))
+
     def close(self):
-        # @hack
-        self.sw.close()
+        if self.sw is not None:
+            self.sw.close()
 
     def get_ctx(self):
         if mx.context.num_gpus() > 0:
@@ -94,7 +111,7 @@ class A2C(object):
         return trainer_actor, loss_actor, trainer_critic, loss_critic
 
     def get_state_from_game(self, state):
-        s = resize(state.screen_buffer, (84, 84), mode='constant')
+        s = resize(state.labels_buffer, (84, 84), mode='constant', anti_aliasing=False)
         s = np.float32(s / 255.)
         if not self.history:
             self.history = [s, s, s, s]
@@ -140,20 +157,21 @@ class A2C(object):
         self.all_p_max += np.amax(prob.asnumpy()[0])       
 
     def summary(self, n_episode, score, duration):
-        self.sw.add_scalar(
-            tag='socre', 
-            value=score,
-            global_step=n_episode
-        )
-        self.sw.add_scalar(
-            tag='duration', 
-            value=duration,
-            global_step=n_episode
-        )
-        self.sw.add_scalar(
-            tag='avg_p_max',
-            value=self.all_p_max / duration,
-            global_step=n_episode
-        )
+        if self.sw is not None:
+            self.sw.add_scalar(
+                tag='socre', 
+                value=score,
+                global_step=n_episode
+            )
+            self.sw.add_scalar(
+                tag='duration', 
+                value=duration,
+                global_step=n_episode
+            )
+            self.sw.add_scalar(
+                tag='avg_p_max',
+                value=self.all_p_max / duration,
+                global_step=n_episode
+            )
 
         self.all_p_max = 0.
