@@ -1,4 +1,4 @@
-def doom():
+def doom(hparams):
     import vizdoom as vzd
     game = vzd.DoomGame()
     # you can change another doom-world
@@ -41,7 +41,7 @@ def doom():
     game.add_available_game_variable(vzd.GameVariable.AMMO2)
 
     # Causes episodes to finish after 200 tics (actions)
-    game.set_episode_timeout(200)
+    game.set_episode_timeout(hparams.n_step)
 
     # Makes episodes start after 10 tics (~after raising the weapon)
     game.set_episode_start_time(10)
