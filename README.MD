@@ -32,6 +32,6 @@ python3 eval.py
 if you want to play doom by random actions, just run `test.py` script
 
 ## usage
-- `pytorch`
-- `A3C`
+- `gluon`
+- `tensorflow`
 - `visdoom`
