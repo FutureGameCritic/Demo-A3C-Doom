@@ -46,31 +46,33 @@ class ConvBlock(Block):
         return x
 
 class A2C(object):
-    def __init__(self, hparams):
+    def __init__(self, hparams, is_train=True):
         self.hparams = hparams
         self.ctx = self.get_ctx()
 
-        self.net_actor, self.net_critic = self.build_model()
-        self.trainer_actor, self.loss_actor, self.trainer_critic, self.loss_critic = self.get_optimizer()
-        
-        self.history = []
+        if is_train:
+            self.net_actor, self.net_critic = self.build_model()
+            self.trainer_actor, self.loss_actor, self.trainer_critic, self.loss_critic = self.get_optimizer()
 
-        self.sw = SummaryWriter(logdir=self.hparams.log_dir) if self.hparams.log_dir else None
-        self.all_p_max = 0.
+            self.sw = SummaryWriter(logdir=self.hparams.log_dir) if self.hparams.log_dir else None
+            self.all_p_max = 0.
+        else:
+            self.ready_eval()
+
+    def ready_eval(self):
+        self.net_actor = self.build_actor()
+        self.load_model(False)
 
     def save_model(self, epoch):
         self.net_actor.save_parameters("{}/net_actor_{}".format(self.hparams.save_dir, epoch))
         self.net_critic.save_parameters("{}/net_critic_{}".format(self.hparams.save_dir, epoch))
-        print(colored("===> Save Model in epoch {}".format(e), "green"))
+        print(colored("===> Save Model in epoch {}".format(epoch), "green"))
 
-    def load_model(self):
-        if self.hparams.load_epoch:
-            epoch = self.hparams.load_epoch
-        else:
-            epoch = get_latest_epoch(self.hparams.load_dir)
-            
+    def load_model(self, is_train=True):
+        epoch = self.hparams.load_epoch if self.hparams.load_epoch else get_latest_epoch(self.hparams.load_dir)
         self.net_actor.load_parameters("{}/net_actor_{}".format(self.hparams.load_dir, epoch), ctx=self.ctx)
-        self.net_critic.load_parameters("{}/net_critic_{}".format(self.hparams.load_dir, epoch), ctx=self.ctx)
+        if is_train:
+            self.net_critic.load_parameters("{}/net_critic_{}".format(self.hparams.load_dir, epoch), ctx=self.ctx)
         print(colored("===> Load Model in epoch {}".format(epoch), "green"))
 
     def close(self):
@@ -85,21 +87,25 @@ class A2C(object):
             print(colored("enable cpu mode","green"))
             return mx.cpu(0)
 
-    def build_model(self):
+    def build_actor(self):
         actor = nn.Sequential()
         with actor.name_scope():
             actor.add(ConvBlock())
             actor.add(nn.Dense(self.hparams.action_size, activation=None))
             actor.add(Softmax())
         actor.initialize(mx.init.Xavier(), ctx=self.ctx)
+        return actor
 
+    def build_critic(self):
         critic = nn.Sequential()
         with critic.name_scope():
             critic.add(ConvBlock())
             critic.add(nn.Dense(self.hparams.value_size, activation=None))
         critic.initialize(mx.init.Xavier(), ctx=self.ctx)
+        return critic
 
-        return actor, critic
+    def build_model(self):
+        return self.build_actor(), self.build_critic()
 
     def get_optimizer(self):
         trainer_actor = gluon.Trainer(self.net_actor.collect_params(), 'adam', {'learning_rate': self.hparams.actor_learning_rate})
@@ -110,29 +116,24 @@ class A2C(object):
         
         return trainer_actor, loss_actor, trainer_critic, loss_critic
 
-    def get_state_from_game(self, state):
-        s = resize(state.labels_buffer, (84, 84), mode='constant', anti_aliasing=False)
+    def preprocess(self, doom_state):
+        s = resize(doom_state.labels_buffer, (84, 84), mode='constant', anti_aliasing=False)
+        s = np.expand_dims(s, axis=0)
         s = np.float32(s / 255.)
-        if not self.history:
-            self.history = [s, s, s, s]
-        else:
-            for i in range(3):
-                self.history[i] = self.history[i+1]
-            self.history[3] = s
-        
-        our_state = nd.array(self.history)
-        our_state = nd.expand_dims(our_state, axis=0) # [1, 4, 84, 84]
-        return our_state
-        
-    def get_action(self, state):
-        policy = self.net_actor(state).asnumpy()[0]
+        return s
+    
+    def get_action(self, history):
+        history = nd.array(history)
+        policy = self.net_actor(history).asnumpy()[0]
         return np.random.choice(self.hparams.action_size, 1, p=policy)[0]
 
-    def train_step(self, state, action, reward, next_state, done):
+    def train_step(self, history, action, reward, next_history, done):
+        history = nd.array(history)
+        next_history = nd.array(next_history)
         with autograd.record():
-            value = self.net_critic(state)
-            next_value = self.net_critic(next_state)
-            prob = self.net_actor(state)
+            value = self.net_critic(history)
+            next_value = self.net_critic(next_history)
+            prob = self.net_actor(history)
 
             # one-hot encoding
             act = nd.array(np.zeros([1, self.hparams.action_size]))

@@ -17,7 +17,7 @@ class progressbar():
         filled_len = int(round(self.bar_len * self.step / float(self.total_step)))
         bar = '=' * filled_len + '-' * (self.bar_len - filled_len)
 
-        sys.stdout.write(" Epoch {%d/%d} [%s] (%d/%d) : %s\r " % (self.epoch, self.total_epoch, bar, self.step, self.total_step, text))
+        sys.stdout.write(" Episode {%d/%d} [%s] (%d/%d) : %s\r " % (self.epoch, self.total_epoch, bar, self.step, self.total_step, text))
         sys.stdout.flush()
 
         self.step += 1

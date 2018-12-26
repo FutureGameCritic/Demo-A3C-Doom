@@ -41,19 +41,28 @@ for e in range(hparams.n_episode):
     done = False
     game.new_episode()
     e_progressbar.add_epoch()
-
+    
+    state = agent.preprocess(game.get_state())
+    history = np.stack((state, state, state, state), axis=1)
+    
     while not done:
-        state = agent.get_state_from_game(game.get_state())
-        action = agent.get_action(state)
+        action = agent.get_action(history)
         
         reward = game.make_action(actions[action])
 
         done = game.is_episode_finished()
         
-        next_state = agent.get_state_from_game(game.get_state()) if not done else state
+        if done:
+            next_state = history[:, -1, :, :]
+            next_history = np.stack((next_state, next_state, next_state, next_state), axis=1)
+        else:
+            next_state = agent.preprocess(game.get_state())
+            next_history = np.append(history[:, 1:, :, :], [next_state], axis=1)
 
-        agent.train_step(state, action, reward, next_state, done)
-    
+        agent.train_step(history, action, reward, next_history, done)
+
+        history = next_history
+
         e_progressbar.printf("")
         
     # @hack : e_progressbar.step
