@@ -3,7 +3,7 @@ from termcolor import colored
 
 from utils.params_loader import loader
 hparams = loader()
-hparams.add_argument('n_episode', type=int, default=10, help='total episode num')
+hparams.add_argument('n_episode', type=int, default=30000, help='total episode num')
 hparams.add_argument('n_step', type=int, default=100, help='total step num')
 hparams.add_argument('discount_factor', type=float, default=0.99, help='discount factor')
 hparams.add_argument('actor_learning_rate', type=float, default=0.001, help='actor learning rate')
@@ -16,7 +16,7 @@ hparams.add_argument('load_epoch', type=str, default='', help='load epoch of mod
 
 hparams.add_parameter('action_size', 3)
 hparams.add_parameter('value_size', 1)
-hparams.add_parameter('epoch_save_model', 10)
+hparams.add_parameter('epoch_save_model', 1000)
 
 hparams = hparams.parsing()
 
