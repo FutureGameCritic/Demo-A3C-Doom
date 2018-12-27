@@ -31,6 +31,16 @@ python3 eval.py
 ## test
 if you want to play doom by random actions, just run `test.py` script
 
+
+## models
+- common
+    - basic block : conv1 -> conv2 -> dense(256)
+    - input : stack 4 frames * (84 * 84) grayscaled label data
+- A2C
+    - 
+- A3C
+    - multi-threading
+    
 ## usage
 - `gluon`
 - `tensorflow`
