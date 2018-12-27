@@ -64,7 +64,6 @@ class Agent(object):
 
     def preprocess(self, doom_state):
         s = resize(doom_state.labels_buffer, (84, 84), mode='constant', anti_aliasing=False)
-        s = np.expand_dims(s, axis=0) # [1, 84, 84]
         s = np.float32(s / 255.)
         return s
     
@@ -160,7 +159,7 @@ class Worker(threading.Thread, Agent):
             game.new_episode()
             
             state = Agent.preprocess(self, game.get_state())
-            history = np.stack((state, state, state, state), axis=1)
+            history = np.stack((state, state, state, state), axis=0) # [ 4 84 84 ]
 
             while not done:
                 self.t += 1
@@ -175,21 +174,22 @@ class Worker(threading.Thread, Agent):
 
                 done = game.is_episode_finished()
                 if done:
-                    next_state = history[:, -1, :, :]
-                    history = np.stack((next_state, next_state, next_state, next_state), axis=1)
+                    next_state = history[-1, :, :]
+                    history = np.stack((next_state, next_state, next_state, next_state), axis=0)
                 else:
-                    next_state = agent.preprocess(game.get_state())
-                    history = np.append(history[:, 1:, :, :], [next_state], axis=1)
+                    next_state = Agent.preprocess(self, game.get_state())
+                    history = np.append(history[1:, :, :], [next_state], axis=0)
                 
                 self.append_sample(history, action_idx, reward)
 
                 if self.t >= self.t_max or done:
-                    self.train_model(done, len(self.sampels))
-                    self.update_workermodel()
+                    self.train_model(done, len(self.samples))
+                    self.update_workermodel(self.actor, self.critic)
                     self.t = 0
                 
                 if done:
                     self.root.n_episode += 1
+                    print(colored("episode : {} score : {} step : {}".format(self.root.n_episode, score, step), "green"))
                     self.summary(self.root.n_episode + 1, score, step)
             
             if self.hparams.save_dir and self.root.n_episode % self.hparams.epoch_save_model == 0 and self.root.n_episode > 0:
@@ -198,65 +198,73 @@ class Worker(threading.Thread, Agent):
         game.close()
     
     def train_model(self, done, len_samples):
-        (trainer_actor, loss_action, trainer_critic, loss_critic) = self.root
-    
-        sampels = np.transpose(self.samples)
-        [historys, actions, rewards] = sampels # using batch
-        
+        samples = np.transpose(self.samples)
+        [historys, actions, rewards] = samples # using batch
+        historys = np.stack(historys, axis=0)
+        actions = np.stack(actions, axis=0)
+        rewards = np.stack(rewards, axis=0)
+
         with autograd.record():
             historys = nd.array(historys)
-            discounted_prediction = self.discounted_prediction(rewards, done, len_samples)
             
-            values = self.critic(historys)
+            running_add = self.root.critic(nd.array(historys[-1:]))[0].asnumpy() if not done else 0
+            discounted_prediction = self.discounted_prediction(rewards, running_add, len_samples)
+            
+            values = self.root.critic(historys)
             advantages = discounted_prediction - values
 
-            prob = self.actor(historys)
+            prob = self.root.actor(historys)
 
             # optimizer
-            loss_action(actions, prob, advantages).backward(retain_graph=True)
-            loss_critic(values, discounted_prediction).backward(retain_graph=True)
+            self.root.loss_actor(nd.array(actions), prob, advantages).backward(retain_graph=True)
+            self.root.loss_critic(values, discounted_prediction).backward(retain_graph=True)
 
-        trainer_actor.step(len_samples)
-        trainer_critic.step(len_samples)
+        self.root.trainer_actor.step(len_samples)
+        self.root.trainer_critic.step(len_samples)
 
         self.samples = [] # reset
 
-    def discounted_prediction(self, rewards, done, len_samples):
+    def discounted_prediction(self, rewards, running_add, len_samples):
         discounted_prediction = np.zeros_like(rewards)
-        running_add = 0
-
-        if not done:
-            history = self.samples[-1, 0]
-            history = np.expand_dims(history, axis=0)
-            running_add = self.critic(nd.array(history))
         
         for t in reversed(range(len_samples)):
-            running_add *= self.hparams.discount_factor + rewards[t]
+            running_add = running_add * (self.hparams.discount_factor + rewards[t])
             discounted_prediction[t] = running_add
 
-        return discounted_prediction
+        return nd.array(discounted_prediction)
     
     def build_model(self):
         actor, critic = Agent.build_model(self)
         
-        actor.set_params(self.root.actor.get_params())
-        critic.set_params(self.root.critic.get_params())
+        if self.hparams.load_dir:
+            self.update_workermodel(actor, critic)
+        else:
+            actor.initialize(mx.init.Xavier(), ctx=self.ctx)
+            critic.initialize(mx.init.Xavier(), ctx=self.ctx)
 
         return actor, critic
 
-    def update_workermodel(self):
-        actor.set_params(self.root.actor.get_params())
-        critic.set_params(self.root.critic.get_params())
+    def update_workermodel(self, actor, critic):
+        global_actor_params = self.root.actor._collect_params_with_prefix()
+        local_actor_params = actor._collect_params_with_prefix()
+        for name in global_actor_params.keys():
+            local_actor_params[name]._load_init(global_actor_params[name]._reduce(), self.ctx)
+        
+        global_critic_params = self.root.critic._collect_params_with_prefix()
+        local_critic_params = critic._collect_params_with_prefix()
+        for name in global_critic_params.keys():
+            local_critic_params[name]._load_init(global_critic_params[name]._reduce(), self.ctx)
 
     def get_action(self, history):
-        history = np.expand_dims(history, axis=0)
-        policy = self.actor(nd.array(history)).asnumpy()[0]
+        history = np.expand_dims(history, axis=0) # [ 1 4 84 84 ]
+        policy = self.actor(nd.array(history))[0].asnumpy()
         action_idx = np.random.choice(self.hparams.action_size, 1, p=policy)[0]
         return action_idx, policy
     
     def append_sample(self, history, action_idx, reward):
-        act = np.zeros(self.hparams.action_size) # one-hot encoding
+        act = np.zeros(self.hparams.action_size)
         act[action_idx] = 1
+        # act = F.one_hot([action_idx], self.hparams.action_size).asnumpy()[0]
         self.samples.append([history, act, reward])
 
     def summary(self, n_episode, score, duration):
