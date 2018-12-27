@@ -24,7 +24,7 @@ class CrossEntropy(Loss):
     def hybrid_forward(self, F, action, prob, advantage):
         action_prob = F.sum(action * prob, axis=1)
         # loss for polocy cross-entroy
-        cross_entropy = F.log(action_prob) * advantage
+        cross_entropy = F.log(action_prob + 1e-10) * advantage
         cross_entropy = -F.sum(cross_entropy)
         # loss for exploration
         entropy = F.sum(prob * F.log(prob + 1e-10), axis=1)
@@ -94,6 +94,7 @@ class A3C(Agent):
     def train(self):
         workers = [Worker(self.hparams, self) for _ in range(self.hparams.n_threads)]
 
+        print(colored("===> Tranning Start with thread {}".format(self.hparams.n_threads), "yellow"))
         # @TODO: change to Future
         for worker in workers:
             time.sleep(1)
@@ -101,6 +102,7 @@ class A3C(Agent):
             
         for worker in workers:
             worker.join()
+        print(colored("===> Tranning End", "yellow"))
 
     def build_model(self):
         actor, critic = Agent.build_model(self)
@@ -189,7 +191,7 @@ class Worker(threading.Thread, Agent):
                 
                 if done:
                     self.root.n_episode += 1
-                    print(colored("episode : {} score : {} step : {}".format(self.root.n_episode, score, step), "green"))
+                    print(colored("episode : {} score : {} step : {} p : {}".format(self.root.n_episode, score, step, self.all_p_max / step), "green"))
                     self.summary(self.root.n_episode + 1, score, step)
             
             if self.hparams.save_dir and self.root.n_episode % self.hparams.epoch_save_model == 0 and self.root.n_episode > 0:
@@ -206,11 +208,13 @@ class Worker(threading.Thread, Agent):
 
         with autograd.record():
             historys = nd.array(historys)
-            
-            running_add = self.root.critic(nd.array(historys[-1:]))[0].asnumpy() if not done else 0
+            import pdb;pdb.set_trace()
+            running_add = self.critic(nd.array(historys[-1:]))[0].asnumpy() if not done else 0
             discounted_prediction = self.discounted_prediction(rewards, running_add, len_samples)
             
             values = self.root.critic(historys)
+            values = nd.reshape(values, len(values))
+
             advantages = discounted_prediction - values
 
             prob = self.root.actor(historys)
@@ -226,9 +230,9 @@ class Worker(threading.Thread, Agent):
 
     def discounted_prediction(self, rewards, running_add, len_samples):
         discounted_prediction = np.zeros_like(rewards)
-        
+        print("running_add : {}".format(running_add))
         for t in reversed(range(len_samples)):
-            running_add = running_add * (self.hparams.discount_factor + rewards[t])
+            running_add = running_add * self.hparams.discount_factor + rewards[t]
             discounted_prediction[t] = running_add
 
         return nd.array(discounted_prediction)
@@ -259,6 +263,7 @@ class Worker(threading.Thread, Agent):
         history = np.expand_dims(history, axis=0) # [ 1 4 84 84 ]
         policy = self.actor(nd.array(history))[0].asnumpy()
         action_idx = np.random.choice(self.hparams.action_size, 1, p=policy)[0]
+        print('...{} {}'.format(action_idx, policy))
         return action_idx, policy
     
     def append_sample(self, history, action_idx, reward):

@@ -16,7 +16,7 @@ hparams.add_argument('load_dir', type=str, default='', help='load path of model'
 hparams.add_argument('load_epoch', type=str, default='', help='load epoch of model')
 # doom option
 hparams.add_argument('n_step', type=int, default=100, help='total step num')
-hparams.add_argument('fast_train', type=bool, default=True, help='option for render')
+hparams.add_argument('fast_train', type=bool, default=False, help='option for render')
 
 hparams.add_parameter('action_size', 3)
 hparams.add_parameter('value_size', 1)
