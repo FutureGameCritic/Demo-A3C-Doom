@@ -1,8 +1,5 @@
-import numpy as np
-from termcolor import colored
-from skimage.transform import resize
-
-from utils import get_latest_epoch
+import threading
+import time
 
 import mxnet as mx
 import mxnet.ndarray as F
@@ -45,76 +42,17 @@ class ConvBlock(Block):
         x = self.fc(x)
         return x
 
-class A2C(object):
-    def __init__(self, hparams, is_train=True):
+import numpy as np
+from skimage.transform import resize
+from utils import get_latest_idx
+
+class Agent(object):
+    def __init__(self, hparams):
         self.hparams = hparams
         self.ctx = self.get_ctx()
 
-        if is_train:
-            self.net_actor, self.net_critic = self.build_model()
-            self.trainer_actor, self.loss_actor, self.trainer_critic, self.loss_critic = self.get_optimizer()
-
-            self.sw = SummaryWriter(logdir=self.hparams.log_dir) if self.hparams.log_dir else None
-            self.all_p_max = 0.
-        else:
-            self.ready_eval()
-
-    def ready_eval(self):
-        self.net_actor = self.build_actor()
-        self.load_model(False)
-
-    def save_model(self, epoch):
-        self.net_actor.save_parameters("{}/net_actor_{}".format(self.hparams.save_dir, epoch))
-        self.net_critic.save_parameters("{}/net_critic_{}".format(self.hparams.save_dir, epoch))
-        print(colored("===> Save Model in epoch {}".format(epoch), "green"))
-
-    def load_model(self, is_train=True):
-        epoch = self.hparams.load_epoch if self.hparams.load_epoch else get_latest_epoch(self.hparams.load_dir)
-        self.net_actor.load_parameters("{}/net_actor_{}".format(self.hparams.load_dir, epoch), ctx=self.ctx)
-        if is_train:
-            self.net_critic.load_parameters("{}/net_critic_{}".format(self.hparams.load_dir, epoch), ctx=self.ctx)
-        print(colored("===> Load Model in epoch {}".format(epoch), "green"))
-
-    def close(self):
-        if self.sw is not None:
-            self.sw.close()
-
     def get_ctx(self):
-        if mx.context.num_gpus() > 0:
-            print(colored("enable gpu mode","green"))
-            return mx.gpu(0)
-        else:
-            print(colored("enable cpu mode","green"))
-            return mx.cpu(0)
-
-    def build_actor(self):
-        actor = nn.Sequential()
-        with actor.name_scope():
-            actor.add(ConvBlock())
-            actor.add(nn.Dense(self.hparams.action_size, activation=None))
-            actor.add(Softmax())
-        actor.initialize(mx.init.Xavier(), ctx=self.ctx)
-        return actor
-
-    def build_critic(self):
-        critic = nn.Sequential()
-        with critic.name_scope():
-            critic.add(ConvBlock())
-            critic.add(nn.Dense(self.hparams.value_size, activation=None))
-        critic.initialize(mx.init.Xavier(), ctx=self.ctx)
-        return critic
-
-    def build_model(self):
-        return self.build_actor(), self.build_critic()
-
-    def get_optimizer(self):
-        trainer_actor = gluon.Trainer(self.net_actor.collect_params(), 'adam', {'learning_rate': self.hparams.actor_learning_rate})
-        loss_actor = CrossEntropy()
-
-        trainer_critic = gluon.Trainer(self.net_critic.collect_params(), 'adam', {'learning_rate': self.hparams.critic_learning_rate})
-        loss_critic = L1Loss()
-        
-        return trainer_actor, loss_actor, trainer_critic, loss_critic
+        return mx.cpu()
 
     def preprocess(self, doom_state):
         s = resize(doom_state.labels_buffer, (84, 84), mode='constant', anti_aliasing=False)
@@ -122,57 +60,213 @@ class A2C(object):
         s = np.float32(s / 255.)
         return s
     
-    def get_action(self, history):
-        history = nd.array(history)
-        policy = self.net_actor(history).asnumpy()[0]
-        return np.random.choice(self.hparams.action_size, 1, p=policy)[0]
+    def build_model(self):
+        actor = nn.Sequential()
+        with actor.name_scope():
+            actor.add(ConvBlock())
+            actor.add(nn.Dense(self.hparams.action_size, activation=None))
+            actor.add(Softmax())
+        
+        critic = nn.Sequential()
+        with critic.name_scope():
+            critic.add(ConvBlock())
+            critic.add(nn.Dense(self.hparams.value_size, activation=None))
 
-    def train_step(self, history, action, reward, next_history, done):
-        history = nd.array(history)
-        next_history = nd.array(next_history)
-        with autograd.record():
-            value = self.net_critic(history)
-            next_value = self.net_critic(next_history)
-            prob = self.net_actor(history)
+        return actor, critic
 
-            # one-hot encoding
-            act = nd.array(np.zeros([1, self.hparams.action_size]))
-            act[0][action] = 1
+# export class
+class A3C(Agent):
+    def __init__(self, hparams):
+        Agent.__init__(self, hparams)
 
-            if done:
-                advantage = reward - value
-                target = nd.array([reward])
-            else:
-                advantage = (reward + self.hparams.discount_factor * next_value) - value
-                target = reward + self.hparams.discount_factor * next_value
+        self.n_threads = self.hparams.n_threads
+        self.actor, self.critic = self.build_model()
+        self.trainer_actor, self.loss_actor, self.trainer_critic, self.loss_critic = self.get_optimizer()
+
+        self.n_episode = 0 # global
+        
+    def train(self): # A3C
+        workers = [Worker() for _ in range(self.n_threads)]
+
+        for worker in workers:
+            time.sleep(1)
+            worker.start() # thread class
+
+        t = 0
+        INTERVAL = 60 * 10 # 10 minutes
+        while True:
+            time.sleep(INTERVAL)
+            t += INTERVAL
+            self.save_model(t)
+    
+    def build_model(self):
+        actor, critic = Agent.build_model(self)
+
+        actor.initialize(mx.init.Xavier(), ctx=self.ctx)
+        critic.initialize(mx.init.Xavier(), ctx=self.ctx)
+
+        return actor, critic
+
+    def get_optimizer(self):
+        trainer_actor = gluon.Trainer(self.actor.collect_params(), 'adam', {'learning_rate': self.hparams.actor_learning_rate})
+        loss_actor = CrossEntropy()
+
+        trainer_critic = gluon.Trainer(self.critic.collect_params(), 'RMSprop', {'learning_rate': self.hparams.critic_learning_rate, 'rho':0.99, 'epsilon':0.01})
+        loss_critic = L1Loss()
+        
+        return trainer_actor, loss_actor, trainer_critic, loss_critic
+
+    def save_model(self, minutes):
+        self.actor.save_parameters("{}/net_actor_{}".format(self.hparams.save_dir, minutes))
+        self.critic.save_parameters("{}/net_critic_{}".format(self.hparams.save_dir, minutes))
+        print(colored("===> Save Model in minutes {}".format(minutes), "green"))
+
+    def load_model(self, is_train=True):
+        minutes = self.hparams.load_minutes if self.hparams.load_minutes else get_latest_idx(self.hparams.load_dir)
+        self.net_actor.load_parameters("{}/net_actor_{}".format(self.hparams.load_dir, minutes), ctx=self.ctx)
+        if is_train:
+            self.net_critic.load_parameters("{}/net_critic_{}".format(self.hparams.load_dir, minutes), ctx=self.ctx)
+        print(colored("===> Load Model in minutes {}".format(minutes), "green"))
+
+from game import doom
+
+class Worker(threading.Thread, Agent):
+    def __init__(self, hparams, a3c):
+        Agent.__init__(self, hparams)
+        threading.Thread.__init__(self)
+
+        self.root = a3c # @hack
+        self.actor, self.critic = self.build_model()
+
+        # k-step
+        self.t_max = 20
+        self.t = 0
+
+        self.samples = []
+        self.all_p_max = 0.
+
+    def run(self): # thread
+        game, actions = doom(self.hparams)
+        
+        while self.root.n_episode < self.hparams.max_n_episode:
+            done = False
+            score = 0.
+            step = 0
+
+            game.new_episode()
             
-            # update actor
-            self.loss_actor(act, prob, advantage).backward(retain_graph=True)
-            # update critic
-            self.loss_critic(value, target).backward(retain_graph=True)
+            state = Agent.preprocess(game.get_state())
+            history = np.stack((state, state, state, state), axis=1)
 
-        self.trainer_actor.step(1)
-        self.trainer_critic.step(1)
+            while not done:
+                self.t += 1
+                step += 1
 
-        # to summary
-        self.all_p_max += np.amax(prob.asnumpy()[0])       
+                action_idx, policy = self.get_action(history)
+
+                self.all_p_max += np.amax(policy.asnumpy()[0])
+                
+                reward = game.make_action(actions[action_idx])
+                score += reward
+                
+                self.append_sample(history, action, reward)
+
+                done = game.is_episode_finished()
+                if done:
+                    next_state = history[:, -1, :, :]
+                    next_history = np.stack((next_state, next_state, next_state, next_state), axis=1)
+                else:
+                    next_state = agent.preprocess(game.get_state())
+                    next_history = np.append(history[:, 1:, :, :], [next_state], axis=1)
+                
+                if self.t >= self.t_max or done:
+                    self.train_model()
+                    self.update_workermodel()
+                    self.t = 0
+                
+                if done:
+                    self.root.n_episode += 1
+                    self.summary(self.root.n_episode + 1, score, step)
+                    
+                    self.all_p_max = 0.
+                    step = 0
+    
+    def train_model(self, done): # use batch
+        (trainer_actor, loss_action, trainer_critic, loss_critic)  = self.root
+    
+        sampels = np.transpose(self.samples)
+        [historys, actions, rewards] = sampels
+        
+        with autograd.record():
+            discounted_prediction = self.discounted_prediction(rewards, done)
+
+            values = self.critic(historys)
+            advantages = discounted_prediction - values
+            prob = self.actor(historys)
+            # optimizer
+            loss_action(actions, prob, advantages).backward(retain_graph=True)
+            loss_critic(values, discounted_prediction).backward(retain_graph=True)
+
+        trainer_actor.step(1)
+        trainer_critic.step(1)
+
+        # reset
+        self.samples = []
+
+    def discounted_prediction(self, rewards, done): # 2
+        discounted_prediction = np.zeros_like(rewards)
+        running_add = 0
+
+        if not done:
+            history = self.samples[-1].history
+            running_add = self.critic(history)
+        
+        for t in range(len(rewards)):
+            running_add *= self.hparams.discount_factor + rewards[t]
+            discounted_prediction[t] = running_add
+
+        return discounted_prediction
+    
+    def build_model(self): # 1
+        actor, critic = Agent.build_model(self)
+        
+        # TODO:
+        # actor.initialize(mx.init.Xavier(), ctx=self.ctx)
+        # critic.initialize(mx.init.Xavier(), ctx=self.ctx)
+
+        return actor, critic
+
+    def update_workermodel(self): # 1
+        # TODO:
+        # actor.initialize(mx.init.Xavier(), ctx=self.ctx)
+        # critic.initialize(mx.init.Xavier(), ctx=self.ctx)
+    
+    def get_action(self, history): # 1
+        # history = nd.array(history)
+        policy = self.actor(history).asnumpy()[0]
+        action_idx = np.random.choice(self.hparams.action_size, 1, p=policy)[0]
+        return action_idx, policy
+    
+    def append_sample(self, history, action, reward): # 2
+        act = np.zeros(self.hparams.action_size)
+        act[action] = 1
+        self.samples.append((nd.array(history), act, reward))
 
     def summary(self, n_episode, score, duration):
-        if self.sw is not None:
-            self.sw.add_scalar(
+        if self.root.sw is not None:
+            self.root.sw.add_scalar(
                 tag='socre', 
                 value=score,
                 global_step=n_episode
             )
-            self.sw.add_scalar(
+            self.root.sw.add_scalar(
                 tag='duration', 
                 value=duration,
                 global_step=n_episode
             )
-            self.sw.add_scalar(
+            self.root.sw.add_scalar(
                 tag='avg_p_max',
                 value=self.all_p_max / duration,
                 global_step=n_episode
             )
-
-        self.all_p_max = 0.
+    

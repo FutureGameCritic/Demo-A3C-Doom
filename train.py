@@ -1,5 +1,6 @@
 import numpy as np
 from termcolor import colored
+import os
 
 from utils.params_loader import loader
 hparams = loader()
@@ -16,7 +17,8 @@ hparams.add_argument('load_epoch', type=str, default='', help='load epoch of mod
 
 hparams.add_parameter('action_size', 3)
 hparams.add_parameter('value_size', 1)
-hparams.add_parameter('epoch_save_model', 1000)
+hparams.add_parameter('n_threads', os.cpu_count() - 1)
+hparams.add_parameter('max_n_episode', 800000)
 
 hparams = hparams.parsing()
 
