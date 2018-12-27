@@ -1,5 +1,6 @@
 import threading
 import time
+from termcolor import colored
 
 import mxnet as mx
 import mxnet.ndarray as F
@@ -22,8 +23,14 @@ class CrossEntropy(Loss):
 
     def hybrid_forward(self, F, action, prob, advantage):
         action_prob = F.sum(action * prob, axis=1)
+        # loss for polocy cross-entroy
         cross_entropy = F.log(action_prob) * advantage
-        loss = -F.sum(cross_entropy)
+        cross_entropy = -F.sum(cross_entropy)
+        # loss for exploration
+        entropy = F.sum(prob * F.log(prob + 1e-10), axis=1)
+        entropy = F.sum(entropy)
+        # add two loss
+        loss = cross_entropy + 0.01 * entropy
         return loss
 
 class ConvBlock(Block):
@@ -46,6 +53,7 @@ import numpy as np
 from skimage.transform import resize
 from utils import get_latest_idx
 
+# basic class
 class Agent(object):
     def __init__(self, hparams):
         self.hparams = hparams
@@ -56,7 +64,7 @@ class Agent(object):
 
     def preprocess(self, doom_state):
         s = resize(doom_state.labels_buffer, (84, 84), mode='constant', anti_aliasing=False)
-        s = np.expand_dims(s, axis=0)
+        s = np.expand_dims(s, axis=0) # [1, 84, 84]
         s = np.float32(s / 255.)
         return s
     
@@ -74,31 +82,27 @@ class Agent(object):
 
         return actor, critic
 
-# export class
 class A3C(Agent):
     def __init__(self, hparams):
         Agent.__init__(self, hparams)
 
-        self.n_threads = self.hparams.n_threads
         self.actor, self.critic = self.build_model()
         self.trainer_actor, self.loss_actor, self.trainer_critic, self.loss_critic = self.get_optimizer()
 
-        self.n_episode = 0 # global
+        self.sw = SummaryWriter(logdir=self.hparams.log_dir) if self.hparams.log_dir else None
+        self.n_episode = 0 # @hack: global
         
-    def train(self): # A3C
-        workers = [Worker() for _ in range(self.n_threads)]
+    def train(self):
+        workers = [Worker(self.hparams, self) for _ in range(self.hparams.n_threads)]
 
+        # @TODO: change to Future
         for worker in workers:
             time.sleep(1)
-            worker.start() # thread class
+            worker.start()
+            
+        for worker in workers:
+            worker.join()
 
-        t = 0
-        INTERVAL = 60 * 10 # 10 minutes
-        while True:
-            time.sleep(INTERVAL)
-            t += INTERVAL
-            self.save_model(t)
-    
     def build_model(self):
         actor, critic = Agent.build_model(self)
 
@@ -108,25 +112,24 @@ class A3C(Agent):
         return actor, critic
 
     def get_optimizer(self):
-        trainer_actor = gluon.Trainer(self.actor.collect_params(), 'adam', {'learning_rate': self.hparams.actor_learning_rate})
+        trainer_actor = gluon.Trainer(self.actor.collect_params(), 'adadelta', {'learning_rate': self.hparams.actor_learning_rate, 'rho':0.99, 'epsilon':0.01})
         loss_actor = CrossEntropy()
 
-        trainer_critic = gluon.Trainer(self.critic.collect_params(), 'RMSprop', {'learning_rate': self.hparams.critic_learning_rate, 'rho':0.99, 'epsilon':0.01})
+        trainer_critic = gluon.Trainer(self.critic.collect_params(), 'adadelta', {'learning_rate': self.hparams.critic_learning_rate, 'rho':0.99, 'epsilon':0.01})
         loss_critic = L1Loss()
         
         return trainer_actor, loss_actor, trainer_critic, loss_critic
 
-    def save_model(self, minutes):
-        self.actor.save_parameters("{}/net_actor_{}".format(self.hparams.save_dir, minutes))
-        self.critic.save_parameters("{}/net_critic_{}".format(self.hparams.save_dir, minutes))
-        print(colored("===> Save Model in minutes {}".format(minutes), "green"))
+    def save_model(self, epoch):
+        self.actor.save_parameters("{}/net_actor_{}".format(self.hparams.save_dir, epoch))
+        self.critic.save_parameters("{}/net_critic_{}".format(self.hparams.save_dir, epoch))
+        print(colored("===> Save Model in epoch {}".format(epoch), "green"))
 
-    def load_model(self, is_train=True):
-        minutes = self.hparams.load_minutes if self.hparams.load_minutes else get_latest_idx(self.hparams.load_dir)
-        self.net_actor.load_parameters("{}/net_actor_{}".format(self.hparams.load_dir, minutes), ctx=self.ctx)
-        if is_train:
-            self.net_critic.load_parameters("{}/net_critic_{}".format(self.hparams.load_dir, minutes), ctx=self.ctx)
-        print(colored("===> Load Model in minutes {}".format(minutes), "green"))
+    def load_model(self):
+        epoch = self.hparams.load_epoch if self.hparams.load_epoch else get_latest_idx(self.hparams.load_dir)
+        self.actor.load_parameters("{}/net_actor_{}".format(self.hparams.load_dir, epoch), ctx=self.ctx)
+        self.critic.load_parameters("{}/net_critic_{}".format(self.hparams.load_dir, epoch), ctx=self.ctx)
+        print(colored("===> Load Model in epoch {}".format(epoch), "green"))
 
 from game import doom
 
@@ -145,17 +148,18 @@ class Worker(threading.Thread, Agent):
         self.samples = []
         self.all_p_max = 0.
 
-    def run(self): # thread
+    def run(self):
         game, actions = doom(self.hparams)
         
         while self.root.n_episode < self.hparams.max_n_episode:
             done = False
             score = 0.
             step = 0
+            self.all_p_max = 0.
 
             game.new_episode()
             
-            state = Agent.preprocess(game.get_state())
+            state = Agent.preprocess(self, game.get_state())
             history = np.stack((state, state, state, state), axis=1)
 
             while not done:
@@ -164,93 +168,96 @@ class Worker(threading.Thread, Agent):
 
                 action_idx, policy = self.get_action(history)
 
-                self.all_p_max += np.amax(policy.asnumpy()[0])
+                self.all_p_max += np.amax(policy)
                 
                 reward = game.make_action(actions[action_idx])
                 score += reward
-                
-                self.append_sample(history, action, reward)
 
                 done = game.is_episode_finished()
                 if done:
                     next_state = history[:, -1, :, :]
-                    next_history = np.stack((next_state, next_state, next_state, next_state), axis=1)
+                    history = np.stack((next_state, next_state, next_state, next_state), axis=1)
                 else:
                     next_state = agent.preprocess(game.get_state())
-                    next_history = np.append(history[:, 1:, :, :], [next_state], axis=1)
+                    history = np.append(history[:, 1:, :, :], [next_state], axis=1)
                 
+                self.append_sample(history, action_idx, reward)
+
                 if self.t >= self.t_max or done:
-                    self.train_model()
+                    self.train_model(done, len(self.sampels))
                     self.update_workermodel()
                     self.t = 0
                 
                 if done:
                     self.root.n_episode += 1
                     self.summary(self.root.n_episode + 1, score, step)
-                    
-                    self.all_p_max = 0.
-                    step = 0
+            
+            if self.hparams.save_dir and self.root.n_episode % self.hparams.epoch_save_model == 0 and self.root.n_episode > 0:
+                self.root.save_model(self.root.n_episode)
+        
+        game.close()
     
-    def train_model(self, done): # use batch
-        (trainer_actor, loss_action, trainer_critic, loss_critic)  = self.root
+    def train_model(self, done, len_samples):
+        (trainer_actor, loss_action, trainer_critic, loss_critic) = self.root
     
         sampels = np.transpose(self.samples)
-        [historys, actions, rewards] = sampels
+        [historys, actions, rewards] = sampels # using batch
         
         with autograd.record():
-            discounted_prediction = self.discounted_prediction(rewards, done)
-
+            historys = nd.array(historys)
+            discounted_prediction = self.discounted_prediction(rewards, done, len_samples)
+            
             values = self.critic(historys)
             advantages = discounted_prediction - values
+
             prob = self.actor(historys)
+
             # optimizer
             loss_action(actions, prob, advantages).backward(retain_graph=True)
             loss_critic(values, discounted_prediction).backward(retain_graph=True)
 
-        trainer_actor.step(1)
-        trainer_critic.step(1)
+        trainer_actor.step(len_samples)
+        trainer_critic.step(len_samples)
 
-        # reset
-        self.samples = []
+        self.samples = [] # reset
 
-    def discounted_prediction(self, rewards, done): # 2
+    def discounted_prediction(self, rewards, done, len_samples):
         discounted_prediction = np.zeros_like(rewards)
         running_add = 0
 
         if not done:
-            history = self.samples[-1].history
-            running_add = self.critic(history)
+            history = self.samples[-1, 0]
+            history = np.expand_dims(history, axis=0)
+            running_add = self.critic(nd.array(history))
         
-        for t in range(len(rewards)):
+        for t in reversed(range(len_samples)):
             running_add *= self.hparams.discount_factor + rewards[t]
             discounted_prediction[t] = running_add
 
         return discounted_prediction
     
-    def build_model(self): # 1
+    def build_model(self):
         actor, critic = Agent.build_model(self)
         
-        # TODO:
-        # actor.initialize(mx.init.Xavier(), ctx=self.ctx)
-        # critic.initialize(mx.init.Xavier(), ctx=self.ctx)
+        actor.set_params(self.root.actor.get_params())
+        critic.set_params(self.root.critic.get_params())
 
         return actor, critic
 
-    def update_workermodel(self): # 1
-        # TODO:
-        # actor.initialize(mx.init.Xavier(), ctx=self.ctx)
-        # critic.initialize(mx.init.Xavier(), ctx=self.ctx)
-    
-    def get_action(self, history): # 1
-        # history = nd.array(history)
-        policy = self.actor(history).asnumpy()[0]
+    def update_workermodel(self):
+        actor.set_params(self.root.actor.get_params())
+        critic.set_params(self.root.critic.get_params())
+
+    def get_action(self, history):
+        history = np.expand_dims(history, axis=0)
+        policy = self.actor(nd.array(history)).asnumpy()[0]
         action_idx = np.random.choice(self.hparams.action_size, 1, p=policy)[0]
         return action_idx, policy
     
-    def append_sample(self, history, action, reward): # 2
-        act = np.zeros(self.hparams.action_size)
-        act[action] = 1
-        self.samples.append((nd.array(history), act, reward))
+    def append_sample(self, history, action_idx, reward):
+        act = np.zeros(self.hparams.action_size) # one-hot encoding
+        act[action_idx] = 1
+        self.samples.append([history, act, reward])
 
     def summary(self, n_episode, score, duration):
         if self.root.sw is not None:
