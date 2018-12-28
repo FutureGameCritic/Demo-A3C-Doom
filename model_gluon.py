@@ -1,5 +1,5 @@
-import threading
-import time
+from multiprocessing import Process, Queue
+
 from termcolor import colored
 
 import mxnet as mx
@@ -53,14 +53,17 @@ import numpy as np
 from skimage.transform import resize
 from utils import get_latest_idx
 
+def hparams2params(hparams):
+    return [hparams.action_size, hparams.value_size, hparams.discount_factor, hparams.max_n_episode]
+
 # basic class
 class Agent(object):
-    def __init__(self, hparams):
-        self.hparams = hparams
+    def __init__(self, params):
+        self.params = params
         self.ctx = self.get_ctx()
 
     def get_ctx(self):
-        return mx.cpu()
+        return mx.cpu(0)
 
     def preprocess(self, doom_state):
         s = resize(doom_state.labels_buffer, (84, 84), mode='constant', anti_aliasing=False)
@@ -68,41 +71,82 @@ class Agent(object):
         return s
     
     def build_model(self):
+        cnn_block = ConvBlock()
+        cnn_block.initialize(mx.init.Xavier(), ctx=self.ctx)
+
+        actor_block = nn.Sequential()
+        with actor_block.name_scope():
+            actor_block.add(nn.Dense(self.params[0], activation=None))
+            actor_block.add(Softmax())
+        actor_block.initialize(mx.init.Xavier(), ctx=self.ctx)
+        
+        critic_block = nn.Sequential()
+        with critic_block.name_scope():
+            critic_block.add(nn.Dense(self.params[1], activation=None))
+        critic_block.initialize(mx.init.Xavier(), ctx=self.ctx)
+
         actor = nn.Sequential()
         with actor.name_scope():
-            actor.add(ConvBlock())
-            actor.add(nn.Dense(self.hparams.action_size, activation=None))
-            actor.add(Softmax())
-        
+            actor.add(cnn_block)
+            actor.add(actor_block)
+
         critic = nn.Sequential()
         with critic.name_scope():
-            critic.add(ConvBlock())
-            critic.add(nn.Dense(self.hparams.value_size, activation=None))
+            critic.add(cnn_block)
+            critic.add(critic_block)
 
-        return actor, critic
+        return actor, critic, cnn_block, actor_block, critic_block
 
 class A3C(Agent):
     def __init__(self, hparams):
-        Agent.__init__(self, hparams)
-
-        self.actor, self.critic = self.build_model()
+        self.hparams = hparams
+        self.params = hparams2params(hparams)
+        Agent.__init__(self, self.params)
+        
+        self.actor, self.critic, self.cnn_block, self.actor_block, self.critic_block = self.build_model()
         self.trainer_actor, self.loss_actor, self.trainer_critic, self.loss_critic = self.get_optimizer()
 
         self.sw = SummaryWriter(logdir=self.hparams.log_dir) if self.hparams.log_dir else None
-        self.n_episode = 0 # @hack: global
+        
+        self.n_episode = 0 # @hack: shared variable
+        self.in_queue = Queue() # experiences
+        self.out_queue = Queue() # weights
         
     def train(self):
-        workers = [Worker(self.hparams, self) for _ in range(self.hparams.n_threads)]
+        workers = [Worker(self.params, self.n_episode, self.in_queue, self.out_queue) for _ in range(self.hparams.n_threads)]
 
         print(colored("===> Tranning Start with thread {}".format(self.hparams.n_threads), "yellow"))
         # @TODO: change to Future
         for worker in workers:
-            time.sleep(1)
             worker.start()
             
+        while True:
+            if self.in_queue.qsize() > 0:
+                self.update_model(self.in_queue.get())
+                self.raise_weight()
+
         for worker in workers:
             worker.join()
         print(colored("===> Tranning End", "yellow"))
+
+    def update_model(self, samples):
+        [actions, prob, advantages, values, discounted_prediction] = samples
+
+        with autograd.record():
+            self.loss_actor(actions, prob, advantages).backward(retain_graph=True)
+            self.loss_critic(values, discounted_prediction).backward(retain_graph=True)
+
+        step_size = len(actions)
+        self.trainer.step(step_size)
+    
+    def raise_weight(self):
+        weight_dict = {}
+        for block in [self.cnn_block, self.actor_block, self.critic_block]:
+            params = block._collect_params_with_prefix()
+            arg_dict = {key : val._reduce() for key, val in params.items()}
+            weight_dict = {block_name : arg_dict}
+        
+        self.out_queue.put(weight_dict)
 
     def build_model(self):
         actor, critic = Agent.build_model(self)
@@ -113,13 +157,12 @@ class A3C(Agent):
         return actor, critic
 
     def get_optimizer(self):
-        trainer_actor = gluon.Trainer(self.actor.collect_params(), 'adadelta', {'learning_rate': self.hparams.actor_learning_rate, 'rho':0.99, 'epsilon':0.01})
+        trainer = gluon.Trainer({'actor':self.actor.collect_params(), 'critic':self.critic.collect_params()}, 'adadelta', {'learning_rate': self.hparams.actor_learning_rate, 'rho':0.99, 'epsilon':0.01})
+        
         loss_actor = CrossEntropy()
-
-        trainer_critic = gluon.Trainer(self.critic.collect_params(), 'adadelta', {'learning_rate': self.hparams.critic_learning_rate, 'rho':0.99, 'epsilon':0.01})
         loss_critic = L1Loss()
         
-        return trainer_actor, loss_actor, trainer_critic, loss_critic
+        return trainer, loss_actor, loss_critic
 
     def save_model(self, epoch):
         self.actor.save_parameters("{}/net_actor_{}".format(self.hparams.save_dir, epoch))
@@ -134,13 +177,13 @@ class A3C(Agent):
 
 from game import doom
 
-class Worker(threading.Thread, Agent):
-    def __init__(self, hparams, a3c):
-        Agent.__init__(self, hparams)
-        threading.Thread.__init__(self)
+class Worker(Process, Agent):
+    def __init__(self, params, n_episode, in_queue, out_queue):
+        Process.__init__(self)
+        Agent.__init__(self, params)
 
-        self.root = a3c # @hack
-        self.actor, self.critic = self.build_model()
+        self.params = params
+        self.actor, self.critic, self.cnn_block, self.actor_block, self.critic_block = self.build_model()
 
         # k-step
         self.t_max = 20
@@ -149,10 +192,14 @@ class Worker(threading.Thread, Agent):
         self.samples = []
         self.all_p_max = 0.
 
+        # process
+        self.n_episode = n_episode
+        self.in_queue = in_queue
+        self.out_queue = out_queue
+
     def run(self):
-        game, actions = doom(self.hparams)
-        
-        while self.root.n_episode < self.hparams.max_n_episode:
+        game, actions = doom()
+        while self.n_episode < self.params[3]:
             done = False
             score = 0.
             step = 0
@@ -186,18 +233,22 @@ class Worker(threading.Thread, Agent):
 
                 if self.t >= self.t_max or done:
                     self.train_model(done, len(self.samples))
-                    self.update_workermodel(self.actor, self.critic)
+                    if self.out_queue.qsize() > 0:
+                        self.update_workermodel(self.out_queue.get())
                     self.t = 0
                 
                 if done:
-                    self.root.n_episode += 1
-                    print(colored("episode : {} score : {} step : {} p : {}".format(self.root.n_episode, score, step, self.all_p_max / step), "green"))
-                    self.summary(self.root.n_episode + 1, score, step)
+                    self.n_episode += 1
+                    print(colored("episode : {} score : {} step : {} p : {}".format(self.n_episode, score, step, self.all_p_max / step), "green"))
+                    # @TODO:
+                    # self.summary(self.root.n_episode + 1, score, step)
             
-            if self.hparams.save_dir and self.root.n_episode % self.hparams.epoch_save_model == 0 and self.root.n_episode > 0:
-                self.root.save_model(self.root.n_episode)
-        
+            # @TODO:
+            # if self.hparams.save_dir and self.root.n_episode % self.hparams.epoch_save_model == 0 and self.root.n_episode > 0:
+            #     self.root.save_model(self.root.n_episode)
         game.close()
+
+        print(colored("======> Thread #{} End".format(self.ident), "yellow"))
     
     def train_model(self, done, len_samples):
         samples = np.transpose(self.samples)
@@ -208,7 +259,7 @@ class Worker(threading.Thread, Agent):
 
         with autograd.record():
             historys = nd.array(historys)
-            import pdb;pdb.set_trace()
+            # import pdb;pdb.set_trace()
             running_add = self.critic(nd.array(historys[-1:]))[0].asnumpy() if not done else 0
             discounted_prediction = self.discounted_prediction(rewards, running_add, len_samples)
             
@@ -218,75 +269,63 @@ class Worker(threading.Thread, Agent):
             advantages = discounted_prediction - values
 
             prob = self.root.actor(historys)
+            actions = nd.array(actions)
 
-            # optimizer
-            self.root.loss_actor(nd.array(actions), prob, advantages).backward(retain_graph=True)
-            self.root.loss_critic(values, discounted_prediction).backward(retain_graph=True)
-
-        self.root.trainer_actor.step(len_samples)
-        self.root.trainer_critic.step(len_samples)
+        self.in_queue.put([actions, prob, advantages, values, discounted_prediction])
 
         self.samples = [] # reset
 
     def discounted_prediction(self, rewards, running_add, len_samples):
         discounted_prediction = np.zeros_like(rewards)
-        print("running_add : {}".format(running_add))
+        # print("running_add : {}".format(running_add))
         for t in reversed(range(len_samples)):
-            running_add = running_add * self.hparams.discount_factor + rewards[t]
+            running_add = running_add * self.params[2] + rewards[t]
             discounted_prediction[t] = running_add
 
         return nd.array(discounted_prediction)
     
     def build_model(self):
         actor, critic = Agent.build_model(self)
-        
-        if self.hparams.load_dir:
-            self.update_workermodel(actor, critic)
-        else:
-            actor.initialize(mx.init.Xavier(), ctx=self.ctx)
-            critic.initialize(mx.init.Xavier(), ctx=self.ctx)
+        # @TODO:
+        actor.initialize(mx.init.Xavier(), ctx=self.ctx)
+        critic.initialize(mx.init.Xavier(), ctx=self.ctx)
 
         return actor, critic
 
-    def update_workermodel(self, actor, critic):
-        global_actor_params = self.root.actor._collect_params_with_prefix()
-        local_actor_params = actor._collect_params_with_prefix()
-        for name in global_actor_params.keys():
-            local_actor_params[name]._load_init(global_actor_params[name]._reduce(), self.ctx)
-        
-        global_critic_params = self.root.critic._collect_params_with_prefix()
-        local_critic_params = critic._collect_params_with_prefix()
-        for name in global_critic_params.keys():
-            local_critic_params[name]._load_init(global_critic_params[name]._reduce(), self.ctx)
+    def update_workermodel(self, weight_dict):
+        for block in [self.cnn_block, self.actor_block, self.critic_block]:
+            arg_dict = weight_dict[block_name]
+            params = block._collect_params_with_prefix()
+            for name in params.keys():
+                params[name]._load_init(arg_dict[name], self.ctx)
 
     def get_action(self, history):
         history = np.expand_dims(history, axis=0) # [ 1 4 84 84 ]
         policy = self.actor(nd.array(history))[0].asnumpy()
-        action_idx = np.random.choice(self.hparams.action_size, 1, p=policy)[0]
-        print('...{} {}'.format(action_idx, policy))
+        action_idx = np.random.choice(self.params[0], 1, p=policy)[0]
+        # print('...{} {}'.format(action_idx, policy))
         return action_idx, policy
     
     def append_sample(self, history, action_idx, reward):
-        act = np.zeros(self.hparams.action_size)
+        act = np.zeros(self.params[0])
         act[action_idx] = 1
-        # act = F.one_hot([action_idx], self.hparams.action_size).asnumpy()[0]
         self.samples.append([history, act, reward])
 
-    def summary(self, n_episode, score, duration):
-        if self.root.sw is not None:
-            self.root.sw.add_scalar(
-                tag='socre', 
-                value=score,
-                global_step=n_episode
-            )
-            self.root.sw.add_scalar(
-                tag='duration', 
-                value=duration,
-                global_step=n_episode
-            )
-            self.root.sw.add_scalar(
-                tag='avg_p_max',
-                value=self.all_p_max / duration,
-                global_step=n_episode
-            )
+    # def summary(self, n_episode, score, duration):
+    #     if self.root.sw is not None:
+    #         self.root.sw.add_scalar(
+    #             tag='socre', 
+    #             value=score,
+    #             global_step=n_episode
+    #         )
+    #         self.root.sw.add_scalar(
+    #             tag='duration', 
+    #             value=duration,
+    #             global_step=n_episode
+    #         )
+    #         self.root.sw.add_scalar(
+    #             tag='avg_p_max',
+    #             value=self.all_p_max / duration,
+    #             global_step=n_episode
+    #         )
     

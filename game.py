@@ -1,4 +1,4 @@
-def doom(hparams):
+def doom():
     import vizdoom as vzd
     game = vzd.DoomGame()
     # you can change another doom-world
@@ -21,19 +21,20 @@ def doom(hparams):
     game.set_automap_buffer_enabled(False)
 
     # Sets other rendering options (all of these options except crosshair are enabled (set to True) by default)
-    if hparams.fast_train is False:
-        game.set_render_hud(False)
-        game.set_render_minimal_hud(False)  # If hud is enabled
-        game.set_render_crosshair(False)
-        game.set_render_weapon(True)
-        game.set_render_decals(False)  # Bullet holes and blood on the walls
-        game.set_render_particles(False)
-        game.set_render_effects_sprites(False)  # Smoke and blood
-        game.set_render_messages(False)  # In-game messages
-        game.set_render_corpses(False)
-        game.set_render_screen_flashes(True)  # Effect upon taking damage or picking up items
-    else:
-        game.set_window_visible(False)
+    # TODO:
+    # if hparams.fast_train is False:
+    #     game.set_render_hud(False)
+    #     game.set_render_minimal_hud(False)  # If hud is enabled
+    #     game.set_render_crosshair(False)
+    #     game.set_render_weapon(True)
+    #     game.set_render_decals(False)  # Bullet holes and blood on the walls
+    #     game.set_render_particles(False)
+    #     game.set_render_effects_sprites(False)  # Smoke and blood
+    #     game.set_render_messages(False)  # In-game messages
+    #     game.set_render_corpses(False)
+    #     game.set_render_screen_flashes(True)  # Effect upon taking damage or picking up items
+    # else:
+    game.set_window_visible(False)
 
 
     # Adds buttons that will be allowed.
@@ -42,7 +43,7 @@ def doom(hparams):
     game.add_available_button(vzd.Button.ATTACK)
 
     # Causes episodes to finish after 200 tics (actions)
-    game.set_episode_timeout(hparams.n_step)
+    game.set_episode_timeout(100) # TODO:
 
     # Makes episodes start after 10 tics (~after raising the weapon)
     game.set_episode_start_time(10)
@@ -59,10 +60,12 @@ def doom(hparams):
     # Initialize the game. Further configuration won't take any effect from now on.
     game.init()
 
+    return game
+
+def doom_actions():
     # Define some actions. Each list entry corresponds to declared buttons:
     # MOVE_LEFT, MOVE_RIGHT, ATTACK
     # game.get_available_buttons_size() can be used to check the number of available buttons.
     # 5 more combinations are naturally possible but only 3 are included for transparency when watching.
     actions = [[True, False, False], [False, True, False], [False, False, True]]
-
-    return game, actions
+    return actions
