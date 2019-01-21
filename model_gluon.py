@@ -143,13 +143,22 @@ class A3C(Agent):
         
         print(colored("===> Training End", "yellow"))
 
+        self.close()
+
+    def close(self):
+        if self.sw is not None:
+            self.sw.close()
+
     def update_model(self, samples):
         # print(colored("=> update_model", "red"))
         step_size = 1
 
         autograd.set_recording(True)
         with autograd.record():
-            [actions, prob, advantages, values, discounted_prediction] = samples
+            [actions, prob, advantages, values, discounted_prediction, summary_info] = samples
+            if len(summary_info) > 0:
+                [n_episode, score, duration, avg_p_max] = summary_info
+                self.summary(n_episode, score, duration, avg_p_max)
 
             actions.attach_grad()
             prob.attach_grad()
@@ -201,6 +210,24 @@ class A3C(Agent):
         self.critic.load_parameters("{}/net_critic_{}".format(self.hparams.load_dir, epoch), ctx=self.ctx)
         print(colored("===> Load Model in epoch {}".format(epoch), "green"))
 
+    def summary(self, n_episode, score, duration, avg_p_max):
+        if self.sw is not None:
+            self.sw.add_scalar(
+                tag='socre', 
+                value=score,
+                global_step=n_episode
+            )
+            self.sw.add_scalar(
+                tag='duration', 
+                value=duration,
+                global_step=n_episode
+            )
+            self.sw.add_scalar(
+                tag='avg_p_max',
+                value=avg_p_max,
+                global_step=n_episode
+            )
+            
 from game import doom, doom_actions
 
 class Worker(Process, Agent):
@@ -259,7 +286,7 @@ class Worker(Process, Agent):
                 self.append_sample(history, action_idx, reward)
 
                 if self.t >= self.t_max or done:
-                    self.train_model(done, len(self.samples))
+                    self.train_model(done, len(self.samples), [self.n_episode.value + 1, score, step, self.all_p_max / step])
                     if self.out_queue.empty() is False:
                         self.update_workermodel(self.out_queue.get())
                     self.t = 0
@@ -267,8 +294,6 @@ class Worker(Process, Agent):
                 if done:
                     self.n_episode.value = self.n_episode.value + 1
                     print(colored("[episode: {}] [score: {}] [step: {}] [p: {}]".format(self.n_episode.value, score, step, self.all_p_max / step), "green"))
-                    # @TODO:
-                    # self.summary(self.root.n_episode + 1, score, step)
             
             # @TODO:
             # if self.hparams.save_dir and self.root.n_episode % self.hparams.epoch_save_model == 0 and self.root.n_episode > 0:
@@ -277,7 +302,7 @@ class Worker(Process, Agent):
 
         print(colored("======> Thread #{} End".format(self.ident), "yellow"))
     
-    def train_model(self, done, len_samples):
+    def train_model(self, done, len_samples, summary_info):
         samples = np.transpose(self.samples)
         [historys, actions, rewards] = samples # using batch
         historys = np.stack(historys, axis=0)
@@ -297,7 +322,7 @@ class Worker(Process, Agent):
             prob = self.actor(historys)
             actions = nd.array(actions)
         
-        self.in_queue.put([actions, prob, advantages, values, discounted_prediction])
+        self.in_queue.put([actions, prob, advantages, values, discounted_prediction, summary_info if done else [] ])
 
         self.samples = [] # reset
 
@@ -337,22 +362,3 @@ class Worker(Process, Agent):
         act = np.zeros(self.params[0])
         act[action_idx] = 1
         self.samples.append([history, act, reward])
-
-    # def summary(self, n_episode, score, duration):
-    #     if self.root.sw is not None:
-    #         self.root.sw.add_scalar(
-    #             tag='socre', 
-    #             value=score,
-    #             global_step=n_episode
-    #         )
-    #         self.root.sw.add_scalar(
-    #             tag='duration', 
-    #             value=duration,
-    #             global_step=n_episode
-    #         )
-    #         self.root.sw.add_scalar(
-    #             tag='avg_p_max',
-    #             value=self.all_p_max / duration,
-    #             global_step=n_episode
-    #         )
-    
