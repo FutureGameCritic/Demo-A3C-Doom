@@ -71,16 +71,18 @@ class Agent(object):
         return s
     
     def build_model(self):
-        cnn_block = ConvBlock()
+        cnn_block = nn.Sequential(prefix='cnn_block')
+        with cnn_block.name_scope():
+            cnn_block.add(ConvBlock())
         cnn_block.initialize(mx.init.Xavier(), ctx=self.ctx)
 
-        actor_block = nn.Sequential()
+        actor_block = nn.Sequential(prefix='actor_block')
         with actor_block.name_scope():
             actor_block.add(nn.Dense(self.params[0], activation=None))
             actor_block.add(Softmax())
         actor_block.initialize(mx.init.Xavier(), ctx=self.ctx)
-        
-        critic_block = nn.Sequential()
+
+        critic_block = nn.Sequential(prefix='critic_block')
         with critic_block.name_scope():
             critic_block.add(nn.Dense(self.params[1], activation=None))
         critic_block.initialize(mx.init.Xavier(), ctx=self.ctx)
@@ -89,7 +91,7 @@ class Agent(object):
         with actor.name_scope():
             actor.add(cnn_block)
             actor.add(actor_block)
-
+        
         critic = nn.Sequential()
         with critic.name_scope():
             critic.add(cnn_block)
@@ -119,50 +121,73 @@ class A3C(Agent):
         # @TODO: change to Future
         for worker in workers:
             worker.start()
-            
-        while True:
-            if self.in_queue.qsize() > 0:
-                self.update_model(self.in_queue.get())
+
+        # @TODO:
+        dummy_history = mx.nd.random_normal(shape=(1, 4, 84, 84))
+        dummy_prob = self.actor(dummy_history)
+        dummy_values = self.critic(dummy_history)
+
+        is_alive = True
+        while is_alive:
+            if self.in_queue.empty() is False:
+                item = self.in_queue.get()
+                self.update_model(item)
                 self.raise_weight()
+            
+            is_alive = False
+            for worker in workers:
+                is_alive = is_alive | worker.is_alive()
 
         for worker in workers:
             worker.join()
-        print(colored("===> Tranning End", "yellow"))
+        
+        print(colored("===> Training End", "yellow"))
 
     def update_model(self, samples):
-        [actions, prob, advantages, values, discounted_prediction] = samples
+        step_size = 1
 
+        autograd.set_recording(True)
         with autograd.record():
+            [actions, prob, advantages, values, discounted_prediction] = samples
+
+            actions.attach_grad()
+            prob.attach_grad()
+            advantages.attach_grad()
+            values.attach_grad()
+            discounted_prediction.attach_grad()
+
+            step_size = len(actions)
+            
             self.loss_actor(actions, prob, advantages).backward(retain_graph=True)
             self.loss_critic(values, discounted_prediction).backward(retain_graph=True)
 
-        step_size = len(actions)
-        self.trainer.step(step_size)
+        self.trainer_actor.step(step_size, ignore_stale_grad=True)
+        self.trainer_critic.step(step_size, ignore_stale_grad=True)
     
     def raise_weight(self):
         weight_dict = {}
         for block in [self.cnn_block, self.actor_block, self.critic_block]:
             params = block._collect_params_with_prefix()
             arg_dict = {key : val._reduce() for key, val in params.items()}
-            weight_dict = {block_name : arg_dict}
+            weight_dict[block.name] = arg_dict
         
         self.out_queue.put(weight_dict)
 
     def build_model(self):
-        actor, critic = Agent.build_model(self)
+        actor, critic, cnn_block, actor_block, critic_block = Agent.build_model(self)
 
-        actor.initialize(mx.init.Xavier(), ctx=self.ctx)
-        critic.initialize(mx.init.Xavier(), ctx=self.ctx)
+        # actor.initialize(mx.init.Xavier(), ctx=self.ctx)
+        # critic.initialize(mx.init.Xavier(), ctx=self.ctx)
 
-        return actor, critic
+        return actor, critic, cnn_block, actor_block, critic_block
 
     def get_optimizer(self):
-        trainer = gluon.Trainer({'actor':self.actor.collect_params(), 'critic':self.critic.collect_params()}, 'adadelta', {'learning_rate': self.hparams.actor_learning_rate, 'rho':0.99, 'epsilon':0.01})
-        
+        trainer_actor = gluon.Trainer(self.actor.collect_params(), 'adadelta', {'learning_rate': self.hparams.actor_learning_rate, 'rho':0.99, 'epsilon':0.01})
+        trainer_critic = gluon.Trainer(self.critic.collect_params(), 'adadelta', {'learning_rate': self.hparams.actor_learning_rate, 'rho':0.99, 'epsilon':0.01})
         loss_actor = CrossEntropy()
         loss_critic = L1Loss()
         
-        return trainer, loss_actor, loss_critic
+        return trainer_actor, loss_actor, trainer_critic, loss_critic
 
     def save_model(self, epoch):
         self.actor.save_parameters("{}/net_actor_{}".format(self.hparams.save_dir, epoch))
@@ -175,7 +200,7 @@ class A3C(Agent):
         self.critic.load_parameters("{}/net_critic_{}".format(self.hparams.load_dir, epoch), ctx=self.ctx)
         print(colored("===> Load Model in epoch {}".format(epoch), "green"))
 
-from game import doom
+from game import doom, doom_actions
 
 class Worker(Process, Agent):
     def __init__(self, params, n_episode, in_queue, out_queue):
@@ -198,7 +223,8 @@ class Worker(Process, Agent):
         self.out_queue = out_queue
 
     def run(self):
-        game, actions = doom()
+        game = doom()
+        actions = doom_actions()
         while self.n_episode < self.params[3]:
             done = False
             score = 0.
@@ -233,13 +259,13 @@ class Worker(Process, Agent):
 
                 if self.t >= self.t_max or done:
                     self.train_model(done, len(self.samples))
-                    if self.out_queue.qsize() > 0:
+                    if self.out_queue.empty() is False:
                         self.update_workermodel(self.out_queue.get())
                     self.t = 0
                 
                 if done:
                     self.n_episode += 1
-                    print(colored("episode : {} score : {} step : {} p : {}".format(self.n_episode, score, step, self.all_p_max / step), "green"))
+                    print(colored("[episode: {}] [score: {}] [step: {}] [p: {}]".format(self.n_episode, score, step, self.all_p_max / step), "green"))
                     # @TODO:
                     # self.summary(self.root.n_episode + 1, score, step)
             
@@ -256,21 +282,20 @@ class Worker(Process, Agent):
         historys = np.stack(historys, axis=0)
         actions = np.stack(actions, axis=0)
         rewards = np.stack(rewards, axis=0)
-
+        
         with autograd.record():
             historys = nd.array(historys)
-            # import pdb;pdb.set_trace()
-            running_add = self.critic(nd.array(historys[-1:]))[0].asnumpy() if not done else 0
+            running_add = self.critic(historys[-1:])[0].asnumpy() if not done else 0
             discounted_prediction = self.discounted_prediction(rewards, running_add, len_samples)
             
-            values = self.root.critic(historys)
+            values = self.critic(historys)
             values = nd.reshape(values, len(values))
 
             advantages = discounted_prediction - values
 
-            prob = self.root.actor(historys)
+            prob = self.actor(historys)
             actions = nd.array(actions)
-
+        
         self.in_queue.put([actions, prob, advantages, values, discounted_prediction])
 
         self.samples = [] # reset
@@ -285,16 +310,16 @@ class Worker(Process, Agent):
         return nd.array(discounted_prediction)
     
     def build_model(self):
-        actor, critic = Agent.build_model(self)
-        # @TODO:
-        actor.initialize(mx.init.Xavier(), ctx=self.ctx)
-        critic.initialize(mx.init.Xavier(), ctx=self.ctx)
+        actor, critic, cnn_block, actor_block, critic_block = Agent.build_model(self)
 
-        return actor, critic
+        # actor.initialize(mx.init.Xavier(), ctx=self.ctx)
+        # critic.initialize(mx.init.Xavier(), ctx=self.ctx)
+
+        return actor, critic, cnn_block, actor_block, critic_block
 
     def update_workermodel(self, weight_dict):
         for block in [self.cnn_block, self.actor_block, self.critic_block]:
-            arg_dict = weight_dict[block_name]
+            arg_dict = weight_dict[block.name]
             params = block._collect_params_with_prefix()
             for name in params.keys():
                 params[name]._load_init(arg_dict[name], self.ctx)
