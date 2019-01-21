@@ -1,4 +1,4 @@
-from multiprocessing import Process, Queue
+from multiprocessing import Process, Queue, Value
 
 from termcolor import colored
 
@@ -110,7 +110,7 @@ class A3C(Agent):
 
         self.sw = SummaryWriter(logdir=self.hparams.log_dir) if self.hparams.log_dir else None
         
-        self.n_episode = 0 # @hack: shared variable
+        self.n_episode = Value('i', 0) # @hack: shared variable
         self.in_queue = Queue() # experiences
         self.out_queue = Queue() # weights
         
@@ -144,6 +144,7 @@ class A3C(Agent):
         print(colored("===> Training End", "yellow"))
 
     def update_model(self, samples):
+        # print(colored("=> update_model", "red"))
         step_size = 1
 
         autograd.set_recording(True)
@@ -225,7 +226,7 @@ class Worker(Process, Agent):
     def run(self):
         game = doom()
         actions = doom_actions()
-        while self.n_episode < self.params[3]:
+        while self.n_episode.value < self.params[3]:
             done = False
             score = 0.
             step = 0
@@ -264,8 +265,8 @@ class Worker(Process, Agent):
                     self.t = 0
                 
                 if done:
-                    self.n_episode += 1
-                    print(colored("[episode: {}] [score: {}] [step: {}] [p: {}]".format(self.n_episode, score, step, self.all_p_max / step), "green"))
+                    self.n_episode.value = self.n_episode.value + 1
+                    print(colored("[episode: {}] [score: {}] [step: {}] [p: {}]".format(self.n_episode.value, score, step, self.all_p_max / step), "green"))
                     # @TODO:
                     # self.summary(self.root.n_episode + 1, score, step)
             
@@ -318,6 +319,7 @@ class Worker(Process, Agent):
         return actor, critic, cnn_block, actor_block, critic_block
 
     def update_workermodel(self, weight_dict):
+        # print(colored("<= update_workermodel", "blue"))
         for block in [self.cnn_block, self.actor_block, self.critic_block]:
             arg_dict = weight_dict[block.name]
             params = block._collect_params_with_prefix()
