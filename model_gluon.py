@@ -63,7 +63,12 @@ class Agent(object):
         self.ctx = self.get_ctx()
 
     def get_ctx(self):
-        return mx.cpu(0)
+        if mx.context.num_gpus() > 0:
+            # print(colored("enable gpu mode","green"))
+            return mx.gpu(0)
+        else:
+            # print(colored("enable cpu mode","green"))
+            return mx.cpu(0)
 
     def preprocess(self, doom_state):
         s = resize(doom_state.labels_buffer, (84, 84), mode='constant', anti_aliasing=False)
@@ -118,20 +123,17 @@ class A3C(Agent):
         workers = [Worker(self.params, self.n_episode, self.in_queue, self.out_queue) for _ in range(self.hparams.n_threads)]
 
         print(colored("===> Tranning Start with thread {}".format(self.hparams.n_threads), "yellow"))
-        # @TODO: change to Future
         for worker in workers:
             worker.start()
 
         # @TODO:
-        dummy_history = mx.nd.random_normal(shape=(1, 4, 84, 84))
-        dummy_prob = self.actor(dummy_history)
-        dummy_values = self.critic(dummy_history)
-
+        dummy_history = nd.random_normal(shape=(1, 4, 84, 84))
+        self.actor(dummy_history)
+        self.critic(dummy_history)
         is_alive = True
         while is_alive:
             if self.in_queue.empty() is False:
-                item = self.in_queue.get()
-                self.update_model(item)
+                self.update_model(self.in_queue.get())
                 self.raise_weight()
             
             is_alive = False
@@ -151,28 +153,26 @@ class A3C(Agent):
 
     def update_model(self, samples):
         # print(colored("=> update_model", "red"))
-        step_size = 1
+        
+        [step_size, actions, prob, advantages, values, discounted_prediction, summary_info] = samples
 
-        autograd.set_recording(True)
+        actions = nd.array(actions)
+        prob = nd.array(prob)
+        advantages = nd.array(advantages)
+        values = nd.array(values)
+        discounted_prediction = nd.array(discounted_prediction)
+
+        if len(summary_info) > 0:
+            [n_episode, score, duration, avg_p_max] = summary_info
+            self.summary(n_episode, score, duration, avg_p_max)
+        
         with autograd.record():
-            [actions, prob, advantages, values, discounted_prediction, summary_info] = samples
-            if len(summary_info) > 0:
-                [n_episode, score, duration, avg_p_max] = summary_info
-                self.summary(n_episode, score, duration, avg_p_max)
-
-            actions.attach_grad()
-            prob.attach_grad()
-            advantages.attach_grad()
-            values.attach_grad()
-            discounted_prediction.attach_grad()
-
-            step_size = len(actions)
-            
+        
             self.loss_actor(actions, prob, advantages).backward(retain_graph=True)
             self.loss_critic(values, discounted_prediction).backward(retain_graph=True)
 
-        self.trainer_actor.step(step_size, ignore_stale_grad=True)
-        self.trainer_critic.step(step_size, ignore_stale_grad=True)
+        self.trainer_actor.step(step_size)
+        self.trainer_critic.step(step_size)
     
     def raise_weight(self):
         weight_dict = {}
@@ -188,7 +188,7 @@ class A3C(Agent):
 
         # actor.initialize(mx.init.Xavier(), ctx=self.ctx)
         # critic.initialize(mx.init.Xavier(), ctx=self.ctx)
-
+        
         return actor, critic, cnn_block, actor_block, critic_block
 
     def get_optimizer(self):
@@ -286,7 +286,8 @@ class Worker(Process, Agent):
                 self.append_sample(history, action_idx, reward)
 
                 if self.t >= self.t_max or done:
-                    self.train_model(done, len(self.samples), [self.n_episode.value + 1, score, step, self.all_p_max / step])
+                    summary_info = [self.n_episode.value + 1, score, step, self.all_p_max / step]
+                    self.train_model(done, summary_info)
                     if self.out_queue.empty() is False:
                         self.update_workermodel(self.out_queue.get())
                     self.t = 0
@@ -302,33 +303,32 @@ class Worker(Process, Agent):
 
         print(colored("======> Thread #{} End".format(self.ident), "yellow"))
     
-    def train_model(self, done, len_samples, summary_info):
+    def train_model(self, done, summary_info):
+        len_samples = len(self.samples)
         samples = np.transpose(self.samples)
         [historys, actions, rewards] = samples # using batch
         historys = np.stack(historys, axis=0)
         actions = np.stack(actions, axis=0)
         rewards = np.stack(rewards, axis=0)
         
-        with autograd.record():
-            historys = nd.array(historys)
-            running_add = self.critic(historys[-1:])[0].asnumpy() if not done else 0
-            discounted_prediction = self.discounted_prediction(rewards, running_add, len_samples)
-            
-            values = self.critic(historys)
-            values = nd.reshape(values, len(values))
-
-            advantages = discounted_prediction - values
-
-            prob = self.actor(historys)
-            actions = nd.array(actions)
+        historys = nd.array(historys)
+        running_add = self.critic(historys[-1:])[0].asnumpy() if not done else 0
+        discounted_prediction = self.discounted_prediction(rewards, running_add, len_samples)
         
-        self.in_queue.put([actions, prob, advantages, values, discounted_prediction, summary_info if done else [] ])
+        values = self.critic(historys)
+        values = nd.reshape(values, len(values))
+
+        advantages = discounted_prediction - values
+
+        prob = self.actor(historys)
+        
+        self.in_queue.put([len_samples, actions, prob.asnumpy(), advantages.asnumpy(), values.asnumpy(), discounted_prediction.asnumpy(), summary_info if done else [] ])
 
         self.samples = [] # reset
 
     def discounted_prediction(self, rewards, running_add, len_samples):
         discounted_prediction = np.zeros_like(rewards)
-        # print("running_add : {}".format(running_add))
+
         for t in reversed(range(len_samples)):
             running_add = running_add * self.params[2] + rewards[t]
             discounted_prediction[t] = running_add
@@ -355,7 +355,7 @@ class Worker(Process, Agent):
         history = np.expand_dims(history, axis=0) # [ 1 4 84 84 ]
         policy = self.actor(nd.array(history))[0].asnumpy()
         action_idx = np.random.choice(self.params[0], 1, p=policy)[0]
-        # print('...{} {}'.format(action_idx, policy))
+
         return action_idx, policy
     
     def append_sample(self, history, action_idx, reward):
